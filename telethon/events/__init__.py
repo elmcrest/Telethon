@@ -70,6 +70,7 @@ class _EventBuilder(abc.ABC):
 
 class _EventCommon(abc.ABC):
     """Intermediate class with common things to all events"""
+    _event_name = 'Event'
 
     def __init__(self, chat_peer=None, msg_id=None, broadcast=False):
         self._entities = {}
@@ -179,7 +180,7 @@ class _EventCommon(abc.ABC):
 
     def to_dict(self):
         d = {k: v for k, v in self.__dict__.items() if k[0] != '_'}
-        d['_'] = self.__class__.__name__
+        d['_'] = self._event_name
         return d
 
 
@@ -197,7 +198,7 @@ class Raw(_EventBuilder):
 def _name_inner_event(cls):
     """Decorator to rename cls.Event 'Event' as 'cls.Event'"""
     if hasattr(cls, 'Event'):
-        cls.Event.__name__ = '{}.Event'.format(cls.__name__)
+        cls.Event._event_name = '{}.Event'.format(cls.__name__)
     else:
         warnings.warn('Class {} does not have a inner Event'.format(cls))
     return cls
@@ -608,11 +609,12 @@ class ChatAction(_EventBuilder):
     Represents an action in a chat (such as user joined, left, or new pin).
     """
     def build(self, update):
-        if isinstance(update, types.UpdateChannelPinnedMessage):
-            # Telegram sends UpdateChannelPinnedMessage and then
-            # UpdateNewChannelMessage with MessageActionPinMessage.
+        if isinstance(update, types.UpdateChannelPinnedMessage) and update.id == 0:
+            # Telegram does not always send
+            # UpdateChannelPinnedMessage for new pins
+            # but always for unpin, with update.id = 0
             event = ChatAction.Event(types.PeerChannel(update.channel_id),
-                                     new_pin=update.id)
+                                     unpin=True)
 
         elif isinstance(update, types.UpdateChatParticipantAdd):
             event = ChatAction.Event(types.PeerChat(update.chat_id),
@@ -663,6 +665,11 @@ class ChatAction(_EventBuilder):
                 event = ChatAction.Event(msg,
                                          users=msg.from_id,
                                          new_photo=True)
+            elif isinstance(action, types.MessageActionPinMessage):
+                # Telegram always sends this service message for new pins
+                event = ChatAction.Event(msg,
+                                         users=msg.from_id,
+                                         new_pin=msg.reply_to_msg_id)
             else:
                 return
         else:
@@ -677,7 +684,7 @@ class ChatAction(_EventBuilder):
 
         Members:
             new_pin (:obj:`bool`):
-                ``True`` if the pin has changed (new pin or removed).
+                ``True`` if there is a new pin.
 
             new_photo (:obj:`bool`):
                 ``True`` if there's a new chat photo (or it was removed).
@@ -703,10 +710,13 @@ class ChatAction(_EventBuilder):
 
             new_title (:obj:`bool`, optional):
                 The new title string for the chat, if applicable.
+
+            unpin (:obj:`bool`):
+                ``True`` if the existing pin gets unpinned.
         """
         def __init__(self, where, new_pin=None, new_photo=None,
                      added_by=None, kicked_by=None, created=None,
-                     users=None, new_title=None):
+                     users=None, new_title=None, unpin=None):
             if isinstance(where, types.MessageService):
                 self.action_message = where
                 where = where.to_id
@@ -725,7 +735,7 @@ class ChatAction(_EventBuilder):
             self._added_by = None
             self._kicked_by = None
             self.user_added, self.user_joined, self.user_left,\
-                self.user_kicked = (False, False, False, False)
+                self.user_kicked, self.unpin = (False, False, False, False, False)
 
             if added_by is True:
                 self.user_joined = True
@@ -744,6 +754,7 @@ class ChatAction(_EventBuilder):
             self._users = None
             self._input_users = None
             self.new_title = new_title
+            self.unpin = unpin
 
         def respond(self, *args, **kwargs):
             """
@@ -1061,6 +1072,9 @@ class MessageEdited(NewMessage):
         event._entities = update.entities
         return self._message_filter_event(event)
 
+    class Event(NewMessage.Event):
+        pass  # Required if we want a different name for it
+
 
 @_name_inner_event
 class MessageDeleted(_EventBuilder):
@@ -1095,22 +1109,22 @@ class MessageDeleted(_EventBuilder):
 
 class StopPropagation(Exception):
     """
-    If this Exception is found to be raised in any of the handlers for a
-    given update, it will stop the execution of all other registered
-    event handlers in the chain.
-    Think of it like a ``StopIteration`` exception in a for loop.
+    If this exception is raised in any of the handlers for a given event,
+    it will stop the execution of all other registered event handlers.
+    It can be seen as the ``StopIteration`` in a for loop but for events.
 
     Example usage:
-    ```
-    @client.on(events.NewMessage)
-    def delete(event):
-        event.delete()
-        # Other handlers won't have an event to work with
-        raise StopPropagation
-
-    @client.on(events.NewMessage)
-    def _(event):
-        # Will never be reached, because it is the second handler in the chain.
-        pass
-    ```
+        >>> @client.on(events.NewMessage)
+        ... def delete(event):
+        ...     event.delete()
+        ...     # No other event handler will have a chance to handle this event
+        ...     raise StopPropagation
+        ...
+        >>> @client.on(events.NewMessage)
+        ... def _(event):
+        ...     # Will never be reached, because it is the second handler
+        ...     pass
     """
+    # For some reason Sphinx wants the silly >>> or
+    # it will show warnings and look bad when generated.
+    pass
